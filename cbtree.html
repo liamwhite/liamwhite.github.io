@@ -86,11 +86,12 @@
 <p>Assuming we get good splits, which we are almost certain to do picking randomly, we can reduce the size of the returned set by approximately half with each step we take, and eventually find the element of interest. Except now we have done so efficiently with bitmaps alone, which allows us to manage absolutely enormous sets in a very efficient fashion.</p>
 
 <h2>In practice</h2>
-<p>That all sounds good on paper. How good is it in practice? Well, I have cooked up an in-browser demonstration of these principles using the entire Derpibooru search index using some C code compiled to WebAssembly, and some JavaScript code to display the results and the amount of elapsed time.</p>
+<p>That all sounds good on paper. How good is it in practice? Well, I have cooked up an in-browser <a href="bitmap.html">demonstration</a> of these principles using the entire Derpibooru search index using some C code compiled to WebAssembly, and some JavaScript code to display the results and the amount of elapsed time.</p>
 <video controls src="https://derpicdn.net/img/view/2022/1/7/2780362.webm" poster="https://derpicdn.net/img/2022/1/7/2780362/rendered.png"></video>
 <p>When searching for large sets, random ordering (which does not perform a sort) is by far the fastest, but besides that, that sorting by creation date is still quite fast, and sorting by upvotes is a little bit slower. This discrepancy is due to the nature of the correlation between the document IDs and the sort order. The distribution of upvote counts is highly random, and the distribution of creation dates is highly non-random.</p>
 <p>This video shows that the performance is not just a fluke due to good distribution of bits; bitmap quickselect performs well on both synthetic and organic data.</p>
 <p>The performance of the same data in native code, not in a managed environment like the browser, is much better, and ends up below 1 millisecond on average for a majority of queries.</p>
+<p><a href="https://github.com/liamwhite/liamwhite.github.io">My source code is available.</a></p>
 <hr class="end">
 <div class="endnotes">
 <p><sup id="endnote-1">1</sup> If you want to convince yourself that this will always be true, take a list containing 1-10, scramble all the elements below eight, and all the elements above eight, and ask yourself if eight is still in the correct position.</p>

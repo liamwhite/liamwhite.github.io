@@ -1,0 +1,167 @@
+<!doctype html>
+<html>
+<head>
+<title>Emscripten</title>
+<style type="text/css">
+  body {
+    background-color: black;
+    color: white;
+  }
+</style>
+<script src="roaring.js"></script>
+<script>
+const encoder = new TextEncoder();
+const formats = ['gif', 'jpg', 'png', 'svg', 'webm'];
+const formatDict = {};
+
+function decompressIntoHeap(buf) {
+  const compressedLen = buf.byteLength - 4;
+  const decompressedLen = buf.getUint32(0, true);
+
+  const compressedHeapBlob = Module._malloc(compressedLen);
+  const decompressedHeapBlob = Module._malloc(decompressedLen);
+  HEAP8.set(new Uint8Array(buf.buffer).slice(4), compressedHeapBlob);
+  Module._yolo_uncompress(decompressedHeapBlob, decompressedLen, compressedHeapBlob, compressedLen);
+  Module._free(compressedHeapBlob);
+  return [ decompressedHeapBlob, decompressedLen ];
+}
+
+async function loadSearch() {
+  const {
+    _dictionary_from_blob, _bitmap_tree_from_values, _execute_query, _top_k_results,
+    _roaring_bitmap_get_cardinality, _roaring_bitmap_free, _roaring_bitmap_contains,
+    _get_bitmap, _bitmap_select, _lookup_sort_value, _malloc, _free, _yolo_uncompress,
+    _kth_random_result
+  } = Module;
+
+  const status = document.getElementById('status');
+  const textInput = document.getElementById('textinput');
+  const sortInput = document.getElementById('sort');
+  const documents = document.getElementById('documents');
+
+  function yieldControl(statusMsg) {
+    status.textContent = statusMsg;
+    return new Promise(resolve => 
+      requestAnimationFrame(() =>
+        requestAnimationFrame(resolve)
+      )
+    );
+  }
+
+  const start = performance.now();
+
+  await yieldControl('Downloading data (~90MB)');
+  const responses = await Promise.all([fetch('tag_bitmaps.bin.z'), fetch('created.bin.z'), fetch('format_bitmaps.bin.z'), fetch('upvotes.bin.z')]);
+  const [ serializedBitmaps, serializedDates, serializedFormats, serializedUpvotes ] = (await Promise.all(responses.map(x => x.arrayBuffer()))).map(x => new DataView(x));
+  const decoder = new TextDecoder();
+
+  await yieldControl('Decompressing tag bitmap');
+  const [ tagDictBlob, tagDictLen ] = decompressIntoHeap(serializedBitmaps);
+  await yieldControl('Loading tag bitmap');
+  const tagDict = _dictionary_from_blob(tagDictBlob, tagDictLen);
+
+  await yieldControl('Decompressing format bitmap');
+  const [ fmtDictBlob, fmtDictLen ] = decompressIntoHeap(serializedFormats);
+  await yieldControl('Loading format bitmap');
+  const fmtDict = _dictionary_from_blob(fmtDictBlob, fmtDictLen);
+
+  await yieldControl('Decompressing date values');
+  const [ dateDictBlob, dateDictLen ] = decompressIntoHeap(serializedDates);
+  await yieldControl('Loading sort tree for dates');
+  const dateDict = _bitmap_tree_from_values(dateDictBlob, dateDictLen);
+
+  await yieldControl('Decompressing vote values');
+  const [ upvDictBlob, upvDictLen ] = decompressIntoHeap(serializedUpvotes);
+  await yieldControl('Loading sort tree for votes');
+  const upvDict = _bitmap_tree_from_values(upvDictBlob, upvDictLen);
+
+  for (const format of formats) {
+    const utf8Term = encoder.encode(format);
+    const buf = _malloc(utf8Term.byteLength + 1);
+    HEAP8.set(utf8Term, buf);
+    HEAP8[buf + utf8Term.byteLength] = 0;
+    formatDict[format] = _get_bitmap(fmtDict, buf);
+    _free(buf);
+  }
+
+  const end = performance.now();
+  status.textContent = `Done processing in ${(end - start).toFixed(2)} ms`;
+
+  function collectTopK(dictionary, bitmap, cardinality, maxReturned, docs) {
+    function compare(a, b) {
+      let cmp = _lookup_sort_value(dictionary, b) - _lookup_sort_value(dictionary, a);
+      if (!cmp) cmp = b - a;
+      return cmp;
+    }
+
+    const topK = _top_k_results(dictionary, bitmap, cardinality, 25);
+    for (let i = 0; i < maxReturned; i++) {
+      docs.push(_bitmap_select(topK, i));
+    }
+    docs.sort(compare);
+    _roaring_bitmap_free(topK);
+  }
+
+  function recomputeSearch() {
+    const termsToLookup = textInput.value.split(',').map(x => x.toLowerCase().trim()).join(',');
+    const utf8Terms = encoder.encode(termsToLookup);
+    const buf = _malloc(utf8Terms.byteLength + 1);
+    HEAP8.set(utf8Terms, buf);
+    HEAP8[buf + utf8Terms.byteLength] = 0;
+
+    const searchStart = performance.now();
+    const bitmap = _execute_query(tagDict, buf);
+    const cardinality = _roaring_bitmap_get_cardinality(bitmap);
+    const docs = [];
+    const maximumReturned = Math.min(cardinality, 25);
+
+    if (sortInput.value === 'created') {
+      collectTopK(dateDict, bitmap, cardinality, maximumReturned, docs);
+    } else if (sortInput.value === 'upvotes') {
+      collectTopK(upvDict, bitmap, cardinality, maximumReturned, docs);
+    } else {
+      for (let i = 0; i < maximumReturned; i++) {
+        docs.push(_kth_random_result(bitmap, cardinality, i));
+      }
+    }
+
+    const searchEnd = performance.now();
+
+    const docsHtml = docs.map(id => {
+      let fmt = formats.find(f => _roaring_bitmap_contains(formatDict[f], id));
+      if (fmt === 'svg') fmt = 'png';
+      const d = new Date(_lookup_sort_value(dateDict, id)*1000);
+      const url = `https://derpicdn.net/img/${d.getUTCFullYear()}/${d.getUTCMonth()+1}/${d.getUTCDate()}/${id}/thumb.${fmt}`;
+      if (fmt === 'webm') return `<video autoplay muted src="${url}"></video>`;
+      else return `<img src="${url}"/>`;
+    });
+
+    status.textContent = `1-${docs.length} of ${cardinality} result(s) in ${(searchEnd - searchStart).toFixed(2)} ms`;
+    documents.innerHTML = docsHtml.join('');
+
+    _roaring_bitmap_free(bitmap);
+    _free(buf);
+  }
+
+  textInput.addEventListener('input', recomputeSearch);
+  sortInput.addEventListener('input', recomputeSearch);
+}
+
+Module.onRuntimeInitialized = function() {
+  if (window.confirm('Download search index? (90MB)')) {
+    loadSearch();
+  }
+}
+</script>
+</head>
+<body style="padding:20px">
+<div id="status"></div>
+<input id="textinput" type="text"/>
+<select id="sort">
+  <option value="created">Creation date</option>
+  <option value="upvotes">Upvotes</option>
+  <option value="random">Random</option>
+</select>
+<div id="documents" style="margin-top:20px"></div>
+</body>
+</html>
