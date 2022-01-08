@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Bitmap quickselect &mdash; an exploration</title>
+<style type="text/css">
+  body {
+    margin: auto;
+    max-width: 600px;
+    font-family: sans-serif;
+  }
+  img, video {
+    margin-top: 20px;
+    margin-bottom: 20px;
+    max-width: 100%;
+    height: auto;
+  }
+  .end {
+    margin-top: 100px;
+  }
+</style>
+</head>
+<body>
+<h1>Bitmap quickselect &mdash; an exploration</h1>
+<h2>Introduction to bitmaps</h2>
+<p>Traditional bitmap indices have been used in databases for a very long time to speed up the execution of searches for tagged queries. The idea is simple: each tag to be included in the search query is conceptually a set of images. In computer science, there is a fast and compact representation of a set called a bitmap index.</p>
+<div class="img"><img src="1_bitmap.svg"></div>
+<p>In the bitmap index, there is a sequence of bits &mdash; one for each document that is part of the index. For each bit position, it is either 1 or or 0 depending on whether the document is a member of that set. In the example, documents 2, 5, 8, 11, 14, 15, 17, 18, and 19 are members of the set female, since their positions are set to 1, while all the other documents in the index are not, since their positions are set to 0.</p>
+<p>This representation allows for very efficient set operations. For example, taking the intersection of sets female and male can be done in the following way, using the bitwise AND (&amp;) operator:</p>
+<div class="img"><img src="2_conjunction.svg"></div>
+<p>This produces a new set which contains only the members of both input sets (the documents must match male and female). Similarly, you could find the union of the sets (members of either set) with the bitwise OR (|) operator:</p>
+<div class="img"><img src="3_disjunction.svg"></div>
+<p>You could find the complement of a set with the bitwise NOT (~) operator, to match documents without male:</p>
+<div class="img"><img src="4_complement.svg"></div>
+<p>And you could find the set difference by intersecting with the complement, to much documents with female and without male:</p>
+<div class="img"><img src="5_difference.svg"></div>
+<p>All of these operations are great for producing new sets that match exactly the documents we were interested in fetching. Computers even have special instructions specifically designed to perform these operations, as well as count the number of bits in a bitmap index, so these operations are extremely fast even on very large sets. Derpibooru, Philomena's largest user, has close to 3 million images to index, and bitmap index operations take less than a millisecond to run, even with such a large volume of images.</p>
+<p>One issue with our bitmap indices is that while we can query for exact values very easily, we can't query for ranges very efficiently. For example, we could not query for update dates between two times in a way more efficiently than scanning the collections of sets for any sets with dates between those times and then taking a large union.</p>
+<div class="img"><img src="6_big_union.svg"></div>
+<p>Suppose a query produces a set with 3 million documents, since we counted them. Another problem we would have is how do we present the documents which were created most recently first, since displaying all of the results at once would be overwhelming?</p>
+<p>If we take the document IDs to have the same order as the creation date, then we could simply scan backwards in the bitmap index, recording the positions of each set bit, until we had selected the desired number of documents. This would produce their IDs in sorted order.</p>
+<div class="img"><img src="7_backwards_scan.svg"></div>
+<p>But what if we had another field for the documents, like the time it was last updated, and we wanted to order by that field instead? We'd have to map the document IDs back to their sort value, and then sort them using a normal sort function. This isn't that slow to do for just a few documents, but if we have 3 million of them, it could take a while to do.</p>
+<div class="img"><img src="8_mapping.svg"></div>
+
+<h2>The bitmap tree</h2>
+<p>The first problem mentioned, the issue with having to compute large unions for range queries, seems a little bit intractable. But what if we were to store and precompute some of those unions in a systematic way? Let's look at a clever way this can be solved.</p>
+<div class="img"><img src="9_bitmap_node.svg"></div>
+<p>In this case, I've sorted and drawn a box around seven items to indicate that are being grouped together under a parent. The parent indicates the boundaries of the sets it is storing, and includes their union. If we already knew we had to search for a range from exactly <code>2022-01-01</code> to <code>2022-01-07</code>, that would be great! We could just look up this node and immediately have the right union precomputed. But that usually won't be the case. So how does this help us?</p>
+<div class="img"><img src="10_bitmap_tree.svg"></div>
+<p>Here I've collected another range of dates into a set like the first example, and then grouped both of those larger ones into an even larger one containing both, and their union. It may still not be immediately obvious how this helps us, so let's make an observation when trying to find the set of all documents updated at a time later than <code>2021-12-29.</code></p>
+<div class="img"><img src="11_bitmap_tree_worked.svg"></div>
+<p>I've drawn a red overlay on top of all the sets that are inside the range we were interested in. Since we are looking for all sets with labels greater than <code>2021-12-29</code>, we can start with any set, but it might make sense to scan from the bottom up in sorted order, since we can stop including sets once we reach the target. In this case, we can see that there is a grouping that we want to include all of the elements of, but that doesn't contain the actual set that we're interested in stopping at, so we could just include the entire thing with the bitmap we precomputed for it, and not have to compute the union of every single bitmap in that grouping. Cool!</p>
+<p>When we move to the next grouping, we see that it does contain the element that we're interested in stopping at, so we should go into it and start scanning from bottom to top like before, until we finally find a grouping (or individual item) that is not larger than the one we wanted, and stop scanning.</p>
+<p>You could imagine making this tree many levels deep and spanning an arbitrarily large number of bitmaps &mdash; millions, or even billions, and only having to compute a very small number of set unions to answer range queries, due to the clever construction. Computer scientists would generally refer to this construction as a B+tree, and that we only had to visit a logarithmic number of nodes to compute the full union instead of a linear number of nodes.</p>
+
+<h2>Quickselect</h2>
+<p>Delivering the first few highest elements to a user doesn't seem too hard if you have a lot of time to do it. You can just sort all of the elements by loading their sort values from the dictionary, producing a full, complete ordering using a normal sorting algorithm, and then discarding everything that isn't part of the top 25 or so.</p>
+<p>What if you don't have a lot of time? You are busy, and you want to be efficient. Sorting the entire list, which might be millions long, just to discard everything except the top 25 sounds really wasteful, and it is. Surely we can do better, and we can. For simplicity, let's pick the 5th element in sorted order of a short list using quickselect, but this principle applies to lists of any size.</p>
+<div class="img"><img src="12_quickselect_1.svg"></div>
+<p>First, starting with the scrambled list, let's pick a random element that we call the pivot, and remove it from the list. I'll randomly pick the element in the seventh position, so eight, to be the pivot. We don't know anything about this pivot yet; all we know is that it <em>is</em> part of the list.</p>
+<div class="img"><img src="13_quickselect_2.svg"></div>
+<p>Now, let's make two sublists, one on the left with all the elements less than eight, and one on the right with all the elements greater than it, by moving the elements so that they appear on the correct side. The exact way this is accomplished is not critical, as long as the elements are moved to the side they belong in.</p>
+<div class="img"><img src="14_quickselect_3.svg"></div>
+<p>At this point, now eight, if we reinsert it between the lists, has appeared in the correct position in sorted order.<sup><a href="#endnote-1">1</a></sup> We can see here that eight ended up in the ninth slot, and nine is greater than the position we were interested in, so we should repeat this process with only the elements to the <em>left</em>, which are smaller.</p>
+<div class="img"><img src="15_quickselect_4.svg"></div>
+<p>Pick a pivot. I randomly chose three as the pivot.</p>
+<div class="img"><img src="16_quickselect_5.svg"></div>
+<p>Now we repeat the partition step, creating the two sublists as before.</p>
+<div class="img"><img src="17_quickselect_6.svg"></div>
+<p>Three now appears in its final position and can be reinserted. The position of three is in the fourth slot, and we wanted the element that goes in the fifth slot, so we'll focus on the right side.</p>
+<div class="img"><img src="18_quickselect_7.svg"></div>
+<p>Pick a pivot. I randomly chose four as the pivot.</p>
+<div class="img"><img src="19_quickselect_8.svg"></div>
+<p>Now we repeat the partition step. This time the left sublist is empty. Four appears in its final position and can be reinserted. The position of four is in the fifth slot, which means we have found the fifth element in sorted order.</p>
+<div class="img"><img src="20_quickselect_9.svg"></div>
+<p>Through a clever partitioning scheme and a tiny bit of luck with our choices, we got the value of the element in the position of interest without ordering the entire list. Computer scientists might point out that with almost certainty, we will do an exponentially decreasing amount of work each time.</p>
+
+<h2>Bitmap quickselect</h2>
+<p>Quickselect is the fastest known selection algorithm to find the element at the <em>k</em>th position of a sorted list, assuming the list is not already sorted. However, if you give it a set with millions and millions of elements, it still might not be that fast. However, since our search set we computed from earlier is a bitmap, and we already know bitmap operations are very fast even with large sets, we can use a little trick.</p>
+<p>Let's pick a random set element from the bitmap.<sup><a href="#endnote-2">2</a></sup> This corresponds to a document ID, which we'll use for pivoting.</p>
+<div class="img"><img src="21_bitmap_quickselect_1.svg"></div>
+<p>We'll load the sort value for that document ID... and then select everything greater than it, using the bitmap tree! This results in a logarithmic number of evaluations of bitmap unions. Then, we'll also select everything less than it. Finally, we'll intersect these both with our list of results to finish partitioning around the pivot. This is our two sublists from quickselect.</p>
+<div class="img"><img src="22_bitmap_quickselect_2.svg"></div>
+<p>If we wanted to find the first, second, or third item, we could repeat this process with the left sublist. If we wanted to find the fourth item, we have just selected it! If we wanted to find any of the other items, they'd be in the right sublist.</p>
+<p>Assuming we get good splits, which we are almost certain to do picking randomly, we can reduce the size of the returned set by approximately half with each step we take, and eventually find the element of interest. Except now we have done so efficiently with bitmaps alone, which allows us to manage absolutely enormous sets in a very efficient fashion.</p>
+
+<h2>In practice</h2>
+<p>That all sounds good on paper. How good is it in practice? Well, I have cooked up an in-browser demonstration of these principles using the entire Derpibooru search index using some C code compiled to WebAssembly, and some JavaScript code to display the results and the amount of elapsed time.</p>
+<video controls src="https://derpicdn.net/img/view/2022/1/7/2780362.webm" poster="https://derpicdn.net/img/2022/1/7/2780362/rendered.png"></video>
+<p>When searching for large sets, random ordering (which does not perform a sort) is by far the fastest, but besides that, that sorting by creation date is still quite fast, and sorting by upvotes is a little bit slower. This discrepancy is due to the nature of the correlation between the document IDs and the sort order. The distribution of upvote counts is highly random, and the distribution of creation dates is highly non-random.</p>
+<p>This video shows that the performance is not just a fluke due to good distribution of bits; bitmap quickselect performs well on both synthetic and organic data.</p>
+<p>The performance of the same data in native code, not in a managed environment like the browser, is much better, and ends up below 1 millisecond on average for a majority of queries.</p>
+<hr class="end">
+<div class="endnotes">
+<p><sup id="endnote-1">1</sup> If you want to convince yourself that this will always be true, take a list containing 1-10, scramble all the elements below eight, and all the elements above eight, and ask yourself if eight is still in the correct position.</p>
+<p><sup id="endnote-2">2</sup> With practical sparse bitmap formats, this isn't expensive to compute.</p>
+</div>
+</body>
+</html>
